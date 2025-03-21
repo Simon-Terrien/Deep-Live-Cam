@@ -136,7 +136,15 @@ We highly recommend using a `venv` to avoid issues.
 ```bash
 pip install -r requirements.txt
 ```
+change this:
+```bash
+# .env\lib\site-packages\torchvision\transforms\functional_tensor.py
 
+# Import the function from its new location
+from torchvision.transforms.functional import rgb_to_grayscale
+
+# Add any other functions that might be needed
+```
 **For macOS:** Install or upgrade the `python-tk` package:
 
 ```bash
