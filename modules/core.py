@@ -107,6 +107,23 @@ def parse_args() -> None:
     if args.gpu_threads_deprecated:
         print('\033[33mArgument --gpu-threads is deprecated. Use --execution-threads instead.\033[0m')
         modules.globals.execution_threads = args.gpu_threads_deprecated
+def update_frame_processors_from_ui():
+    """Update the frame processors list based on UI toggles"""
+    # Start with an empty list
+    modules.globals.frame_processors = []
+    
+    # Add processors based on UI toggles
+    if modules.globals.fp_ui.get("face_swapper", True):
+        modules.globals.frame_processors.append("face_swapper")
+    
+    if modules.globals.fp_ui.get("face_enhancer", False):
+        modules.globals.frame_processors.append("face_enhancer")
+    
+    if modules.globals.fp_ui.get("hair_transfer", False):
+        modules.globals.frame_processors.append("hair_transfer")
+    
+    # Only include unique processors
+    modules.globals.frame_processors = list(dict.fromkeys(modules.globals.frame_processors))
 
 
 def encode_execution_providers(execution_providers: List[str]) -> List[str]:
@@ -176,6 +193,7 @@ def update_status(message: str, scope: str = 'DLC.CORE') -> None:
         ui.update_status(message)
 
 def start() -> None:
+
     for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
         if not frame_processor.pre_start():
             return
@@ -208,6 +226,8 @@ def start() -> None:
         extract_frames(modules.globals.target_path)
 
     temp_frame_paths = get_temp_frame_paths(modules.globals.target_path)
+    # Update frame processors list based on UI settings
+    update_frame_processors_from_ui()
     for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
         update_status('Progressing...', frame_processor.NAME)
         frame_processor.process_video(modules.globals.source_path, temp_frame_paths)

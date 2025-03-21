@@ -123,7 +123,11 @@ def load_switch_states():
         modules.globals.nsfw_filter = switch_states.get("nsfw_filter", False)
         modules.globals.live_mirror = switch_states.get("live_mirror", False)
         modules.globals.live_resizable = switch_states.get("live_resizable", False)
-        modules.globals.fp_ui = switch_states.get("fp_ui", {"face_enhancer": False})
+        modules.globals.fp_ui = switch_states.get("fp_ui", {
+            "face_enhancer": False,
+            "face_swapper": True,
+            "hair_transfer": False
+        })
         modules.globals.show_fps = switch_states.get("show_fps", False)
         modules.globals.mouth_mask = switch_states.get("mouth_mask", False)
         modules.globals.show_mouth_mask_box = switch_states.get(
@@ -320,7 +324,33 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
         root, text=_("Preview"), cursor="hand2", command=lambda: toggle_preview()
     )
     preview_button.place(relx=0.65, rely=0.80, relwidth=0.2, relheight=0.05)
+    # Face Swapper toggle (always enabled by default)
+    face_swapper_value = ctk.BooleanVar(value=modules.globals.fp_ui["face_swapper"])
+    face_swapper_switch = ctk.CTkSwitch(
+        root,
+        text=_("Face Swapper"),
+        variable=face_swapper_value,
+        cursor="hand2",
+        command=lambda: (
+            update_tumbler("face_swapper", face_swapper_value.get()),
+            save_switch_states(),
+        ),
+    )
+    face_swapper_switch.place(relx=0.6, rely=0.80)
 
+    # Hair Transfer toggle
+    hair_transfer_value = ctk.BooleanVar(value=modules.globals.fp_ui["hair_transfer"])
+    hair_transfer_switch = ctk.CTkSwitch(
+        root,
+        text=_("Hair Transfer"),
+        variable=hair_transfer_value,
+        cursor="hand2",
+        command=lambda: (
+            update_tumbler("hair_transfer", hair_transfer_value.get()),
+            save_switch_states(),
+        ),
+    )
+    hair_transfer_switch.place(relx=0.1, rely=0.80)
     # --- Camera Selection ---
     camera_label = ctk.CTkLabel(root, text=_("Select Camera:"))
     camera_label.place(relx=0.1, rely=0.86, relwidth=0.2, relheight=0.05)

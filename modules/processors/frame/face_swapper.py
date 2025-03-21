@@ -1,10 +1,11 @@
-from typing import Any, List
+from typing import Any, List, Tuple
 import cv2
 import insightface
 import threading
 import numpy as np
-import modules.globals
+import os
 import logging
+import modules.globals
 import modules.processors.frame.core
 from modules.core import update_status
 from modules.face_analyser import get_one_face, get_many_faces, default_source_face
@@ -15,11 +16,18 @@ from modules.utilities import (
     is_video,
 )
 from modules.cluster_analysis import find_closest_centroid
-import os
 
 FACE_SWAPPER = None
 THREAD_LOCK = threading.Lock()
 NAME = "DLC.FACE-SWAPPER"
+
+# Setup logging
+logger = logging.getLogger("DLC.FACE-SWAPPER")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 abs_dir = os.path.dirname(os.path.abspath(__file__))
 models_dir = os.path.join(
@@ -28,17 +36,42 @@ models_dir = os.path.join(
 
 
 def pre_check() -> bool:
-    download_directory_path = abs_dir
-    conditional_download(
-        download_directory_path,
-        [
-            "https://huggingface.co/hacksider/deep-live-cam/blob/main/inswapper_128_fp16.onnx"
-        ],
-    )
+    """
+    Check if model exists and download if necessary
+    
+    Returns:
+        bool: True if model is ready
+    """
+    logger.info("Running pre-check for Face Swapper")
+    download_directory_path = models_dir
+    
+    if not os.path.exists(models_dir):
+        logger.info(f"Creating models directory: {models_dir}")
+        os.makedirs(models_dir, exist_ok=True)
+    
+    model_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
+    if os.path.exists(model_path):
+        logger.info(f"Swap model already exists at: {model_path}")
+    else:
+        logger.info("Swap model not found, downloading...")
+        conditional_download(
+            download_directory_path,
+            [
+                "https://huggingface.co/hacksider/deep-live-cam/blob/main/inswapper_128_fp16.onnx"
+            ],
+        )
+        logger.info("Model download completed")
+    
     return True
 
 
 def pre_start() -> bool:
+    """
+    Verify that valid source and target are selected
+    
+    Returns:
+        bool: True if source and target are valid
+    """
     if not modules.globals.map_faces and not is_image(modules.globals.source_path):
         update_status("Select an image for source path.", NAME)
         return False
@@ -56,25 +89,99 @@ def pre_start() -> bool:
 
 
 def get_face_swapper() -> Any:
+    """
+    Initialize and return the face swapper model
+    
+    Returns:
+        The initialized face swapper model
+    """
     global FACE_SWAPPER
 
     with THREAD_LOCK:
         if FACE_SWAPPER is None:
+            logger.info("Initializing face swapper model")
             model_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
-            FACE_SWAPPER = insightface.model_zoo.get_model(
-                model_path, providers=modules.globals.execution_providers
-            )
+            if not os.path.exists(model_path):
+                logger.error(f"Model file not found: {model_path}")
+                raise FileNotFoundError(f"Model file missing: {model_path}")
+                
+            try:
+                FACE_SWAPPER = insightface.model_zoo.get_model(
+                    model_path, providers=modules.globals.execution_providers
+                )
+                logger.info("Face swapper model initialized successfully")
+            except Exception as e:
+                logger.error(f"Error initializing face swapper: {str(e)}")
+                logger.debug("Error details:", exc_info=True)
+                raise
+    
     return FACE_SWAPPER
 
 
-def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame: # type: ignore
+def expand_face_bbox(face: Face, frame_shape: tuple) -> Face:
+    """
+    Expand the face bounding box to include more of the hair region
+    
+    Args:
+        face: Face object with bbox
+        frame_shape: Shape of the frame (height, width)
+        
+    Returns:
+        Face object with expanded bbox
+    """
+    if face is None:
+        return None
+        
+    # Create a copy to avoid modifying the original
+    expanded_face = face
+    
+    # Extract current bbox coordinates
+    x_min, y_min, x_max, y_max = map(int, face.bbox)
+    
+    # Calculate dimensions
+    height = y_max - y_min
+    width = x_max - x_min
+    
+    # Expand upward for hair (40% expansion)
+    y_min = max(0, y_min - int(height * 0.4))
+    
+    # Expand sides slightly for more context (15% on each side)
+    x_min = max(0, x_min - int(width * 0.15))
+    x_max = min(frame_shape[1], x_max + int(width * 0.15))
+    
+    # Update bbox
+    expanded_face.bbox = np.array([x_min, y_min, x_max, y_max])
+    
+    return expanded_face
+
+
+def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
+    """
+    Swap face from source to target with improved handling of hair regions
+    
+    Args:
+        source_face: Source face object
+        target_face: Target face object
+        temp_frame: Frame containing the target face
+        
+    Returns:
+        Frame with swapped face
+    """
     face_swapper = get_face_swapper()
+    
+    # Create an expanded target face for better hair region inclusion
+    expanded_target_face = expand_face_bbox(target_face, temp_frame.shape)
 
-    # Apply the face swap
-    swapped_frame = face_swapper.get(
-        temp_frame, target_face, source_face, paste_back=True
-    )
+    # Apply the face swap with expanded face regions
+    try:
+        swapped_frame = face_swapper.get(
+            temp_frame, expanded_target_face, source_face, paste_back=True
+        )
+    except Exception as e:
+        logger.error(f"Error during face swap: {str(e)}")
+        return temp_frame
 
+    # Apply mouth mask if enabled
     if modules.globals.mouth_mask:
         # Create a mask for the target face
         face_mask = create_face_mask(target_face, temp_frame)
@@ -98,7 +205,17 @@ def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
     return swapped_frame
 
 
-def process_frame(source_face: Face, temp_frame: Frame) -> Frame: # type: ignore
+def process_frame(source_face: Face, temp_frame: Frame) -> Frame:
+    """
+    Process a single frame for face swapping
+    
+    Args:
+        source_face: Source face
+        temp_frame: Frame to process
+        
+    Returns:
+        Processed frame with swapped face
+    """
     if modules.globals.color_correction:
         temp_frame = cv2.cvtColor(temp_frame, cv2.COLOR_BGR2RGB)
 
@@ -109,18 +226,27 @@ def process_frame(source_face: Face, temp_frame: Frame) -> Frame: # type: ignore
                 if source_face and target_face:
                     temp_frame = swap_face(source_face, target_face, temp_frame)
                 else:
-                    print("Face detection failed for target/source.")
+                    logger.warning("Face detection failed for target/source.")
     else:
         target_face = get_one_face(temp_frame)
         if target_face and source_face:
             temp_frame = swap_face(source_face, target_face, temp_frame)
         else:
-            logging.error("Face detection failed for target or source.")
+            logger.error("Face detection failed for target or source.")
     return temp_frame
 
 
-
 def process_frame_v2(temp_frame: Frame, temp_frame_path: str = "") -> Frame:
+    """
+    Alternative process frame method for mapped face mode
+    
+    Args:
+        temp_frame: Frame to process
+        temp_frame_path: Path to the frame file
+        
+    Returns:
+        Processed frame
+    """
     if is_image(modules.globals.target_path):
         if modules.globals.many_faces:
             source_face = default_source_face()
@@ -213,6 +339,14 @@ def process_frame_v2(temp_frame: Frame, temp_frame_path: str = "") -> Frame:
 def process_frames(
     source_path: str, temp_frame_paths: List[str], progress: Any = None
 ) -> None:
+    """
+    Process multiple frames for face swapping
+    
+    Args:
+        source_path: Path to the source image
+        temp_frame_paths: List of paths to frames
+        progress: Progress tracker
+    """
     if not modules.globals.map_faces:
         source_face = get_one_face(cv2.imread(source_path))
         for temp_frame_path in temp_frame_paths:
@@ -221,8 +355,7 @@ def process_frames(
                 result = process_frame(source_face, temp_frame)
                 cv2.imwrite(temp_frame_path, result)
             except Exception as exception:
-                print(exception)
-                pass
+                logger.error(f"Error processing frame: {str(exception)}")
             if progress:
                 progress.update(1)
     else:
@@ -232,13 +365,20 @@ def process_frames(
                 result = process_frame_v2(temp_frame, temp_frame_path)
                 cv2.imwrite(temp_frame_path, result)
             except Exception as exception:
-                print(exception)
-                pass
+                logger.error(f"Error processing frame: {str(exception)}")
             if progress:
                 progress.update(1)
 
 
 def process_image(source_path: str, target_path: str, output_path: str) -> None:
+    """
+    Process a single image for face swapping
+    
+    Args:
+        source_path: Path to source image
+        target_path: Path to target image
+        output_path: Path to save output image
+    """
     if not modules.globals.map_faces:
         source_face = get_one_face(cv2.imread(source_path))
         target_frame = cv2.imread(target_path)
@@ -255,6 +395,13 @@ def process_image(source_path: str, target_path: str, output_path: str) -> None:
 
 
 def process_video(source_path: str, temp_frame_paths: List[str]) -> None:
+    """
+    Process video frames for face swapping
+    
+    Args:
+        source_path: Path to source image
+        temp_frame_paths: List of paths to video frames
+    """
     if modules.globals.map_faces and modules.globals.many_faces:
         update_status(
             "Many faces enabled. Using first source image. Progressing...", NAME
@@ -265,8 +412,18 @@ def process_video(source_path: str, temp_frame_paths: List[str]) -> None:
 
 
 def create_lower_mouth_mask(
-    face: Face, frame: Frame # type: ignore
-) -> (np.ndarray, np.ndarray, tuple, np.ndarray): # type: ignore
+    face: Face, frame: Frame
+) -> Tuple[np.ndarray, np.ndarray, tuple, np.ndarray]:
+    """
+    Create a mask for the lower mouth area
+    
+    Args:
+        face: Face object with landmarks
+        frame: Frame containing the face
+        
+    Returns:
+        Tuple of (mask, mouth_cutout, bounding_box, lower_lip_polygon)
+    """
     mask = np.zeros(frame.shape[:2], dtype=np.uint8)
     mouth_cutout = None
     landmarks = face.landmark_2d_106
@@ -382,8 +539,19 @@ def create_lower_mouth_mask(
 
 
 def draw_mouth_mask_visualization(
-    frame: Frame, face: Face, mouth_mask_data: tuple # type: ignore
+    frame: Frame, face: Face, mouth_mask_data: tuple
 ) -> Frame:
+    """
+    Draw visualization of the mouth mask for debugging
+    
+    Args:
+        frame: Input frame
+        face: Face object
+        mouth_mask_data: Mouth mask data from create_lower_mouth_mask
+        
+    Returns:
+        Frame with visualization
+    """
     landmarks = face.landmark_2d_106
     if landmarks is not None and mouth_mask_data is not None:
         mask, mouth_cutout, (min_x, min_y, max_x, max_y), lower_lip_polygon = (
@@ -400,21 +568,11 @@ def draw_mouth_mask_visualization(
         # Adjust mask to match the region size
         mask_region = mask[0 : max_y - min_y, 0 : max_x - min_x]
 
-        # Remove the color mask overlay
-        # color_mask = cv2.applyColorMap((mask_region * 255).astype(np.uint8), cv2.COLORMAP_JET)
-
         # Ensure shapes match before blending
         vis_region = vis_frame[min_y:max_y, min_x:max_x]
-        # Remove blending with color_mask
-        # if vis_region.shape[:2] == color_mask.shape[:2]:
-        #     blended = cv2.addWeighted(vis_region, 0.7, color_mask, 0.3, 0)
-        #     vis_frame[min_y:max_y, min_x:max_x] = blended
 
         # Draw the lower lip polygon
         cv2.polylines(vis_frame, [lower_lip_polygon], True, (0, 255, 0), 2)
-
-        # Remove the red box
-        # cv2.rectangle(vis_frame, (min_x, min_y), (max_x, max_y), (0, 0, 255), 2)
 
         # Visualize the feathered mask
         feather_amount = max(
@@ -431,13 +589,6 @@ def draw_mouth_mask_visualization(
             mask_region.astype(float), (kernel_size, kernel_size), 0
         )
         feathered_mask = (feathered_mask / feathered_mask.max() * 255).astype(np.uint8)
-        # Remove the feathered mask color overlay
-        # color_feathered_mask = cv2.applyColorMap(feathered_mask, cv2.COLORMAP_VIRIDIS)
-
-        # Ensure shapes match before blending feathered mask
-        # if vis_region.shape == color_feathered_mask.shape:
-        #     blended_feathered = cv2.addWeighted(vis_region, 0.7, color_feathered_mask, 0.3, 0)
-        #     vis_frame[min_y:max_y, min_x:max_x] = blended_feathered
 
         # Add labels
         cv2.putText(
@@ -470,6 +621,19 @@ def apply_mouth_area(
     face_mask: np.ndarray,
     mouth_polygon: np.ndarray,
 ) -> np.ndarray:
+    """
+    Apply the original mouth area back to the swapped face
+    
+    Args:
+        frame: Frame with swapped face
+        mouth_cutout: Original mouth region
+        mouth_box: Bounding box of mouth region
+        face_mask: Mask of the whole face
+        mouth_polygon: Polygon outlining the mouth
+        
+    Returns:
+        Frame with original mouth area applied
+    """
     min_x, min_y, max_x, max_y = mouth_box
     box_width = max_x - min_x
     box_height = max_y - min_y
@@ -526,12 +690,22 @@ def apply_mouth_area(
 
         frame[min_y:max_y, min_x:max_x] = final_blend.astype(np.uint8)
     except Exception as e:
-        pass
+        logger.error(f"Error applying mouth area: {str(e)}")
 
     return frame
 
 
-def create_face_mask(face: Face, frame: Frame) -> np.ndarray: # type: ignore
+def create_face_mask(face: Face, frame: Frame) -> np.ndarray:
+    """
+    Create a mask for the whole face
+    
+    Args:
+        face: Face object with landmarks
+        frame: Frame containing the face
+        
+    Returns:
+        Mask of the face
+    """
     mask = np.zeros(frame.shape[:2], dtype=np.uint8)
     landmarks = face.landmark_2d_106
     if landmarks is not None:
@@ -553,7 +727,7 @@ def create_face_mask(face: Face, frame: Frame) -> np.ndarray: # type: ignore
 
         face_top = np.min([right_side_face[0, 1], left_side_face[-1, 1]])
         forehead_height = face_top - eyebrow_top
-        extended_forehead_height = int(forehead_height * 5.0)  # Extend by 50%
+        extended_forehead_height = int(forehead_height * 5.0)  # Extend by 500%
 
         # Create forehead points
         forehead_left = right_side_face[0].copy()
@@ -603,6 +777,13 @@ def create_face_mask(face: Face, frame: Frame) -> np.ndarray: # type: ignore
 def apply_color_transfer(source, target):
     """
     Apply color transfer from target to source image
+    
+    Args:
+        source: Source image
+        target: Target image
+        
+    Returns:
+        Color-matched source image
     """
     source = cv2.cvtColor(source, cv2.COLOR_BGR2LAB).astype("float32")
     target = cv2.cvtColor(target, cv2.COLOR_BGR2LAB).astype("float32")

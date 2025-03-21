@@ -1,9 +1,9 @@
+from typing import Any, List, Tuple
 import cv2
 import numpy as np
 import os
 import logging
-import torch
-from typing import Tuple, Any
+import threading
 from modules.typing import Frame, Face
 from modules.core import update_status
 from modules.face_analyser import get_one_face
@@ -18,6 +18,7 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 NAME = "DLC.HAIR-TRANSFER"
+THREAD_LOCK = threading.Lock()
 
 # Constants for hair segmentation
 HAIR_CLASS = 17  # Class ID for hair in segmentation models
@@ -47,8 +48,7 @@ def pre_check() -> bool:
         logger.info(f"Creating models directory: {models_dir}")
         os.makedirs(models_dir, exist_ok=True)
     
-    # Here you would add code to download any face parsing models
-    # Similar to how face_enhancer.py downloads GFPGAN model
+    # In a complete implementation, you would download face parsing models here
     
     return True
 
@@ -89,46 +89,6 @@ def pre_start() -> bool:
     return True
 
 
-def get_face_parser() -> Any:
-    """
-    Initialize and return a face parsing model
-    
-    Returns:
-        The initialized face parser model
-    """
-    global FACE_PARSER
-    
-    if FACE_PARSER is None:
-        logger.info("Initializing face parsing model")
-        try:
-            # For this implementation, we'll use BiSeNet for face parsing
-            # In a real implementation, you would load a proper segmentation model
-            # Such as BiSeNet, FaceParseNet, or similar
-            
-            # This is a placeholder - in production code, you'd implement:
-            # 1. Import your face parsing model (BiSeNet, etc.)
-            # 2. Load the pre-trained weights
-            # 3. Set up the model for inference
-            
-            # For example, if using BiSeNet:
-            # from face_parsing_models import BiSeNet
-            # model = BiSeNet(n_classes=19)
-            # model.load_state_dict(torch.load('path/to/weights.pth'))
-            # model.eval()
-            # FACE_PARSER = model
-            
-            # For now, we'll simulate a face parser with a placeholder function
-            FACE_PARSER = SimulatedFaceParser()
-            
-            logger.info("Face parsing model initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing face parsing model: {str(e)}")
-            logger.debug("Error details:", exc_info=True)
-            raise
-            
-    return FACE_PARSER
-
-
 class SimulatedFaceParser:
     """
     A placeholder class to simulate face parsing functionality
@@ -155,7 +115,7 @@ class SimulatedFaceParser:
         # Apply thresholding to detect potential hair regions (dark areas at top of image)
         _, hair_thresh = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
         
-        # Create a rough hair region (top 1/3 of face)
+        # Create a rough hair region (top part of face)
         height, width = image.shape[:2]
         hair_region = np.zeros_like(hair_thresh)
         hair_region[0:int(height * 0.4), :] = 255
@@ -163,7 +123,7 @@ class SimulatedFaceParser:
         # Combine threshold with region to get hair mask
         hair_mask = cv2.bitwise_and(hair_thresh, hair_region)
         
-        # Create a beard region (bottom 1/3 of face, center area)
+        # Create a beard region (bottom part of face, center area)
         beard_region = np.zeros_like(hair_thresh)
         beard_region[int(height * 0.7):, int(width * 0.3):int(width * 0.7)] = 255
         
@@ -178,6 +138,34 @@ class SimulatedFaceParser:
         seg_map[beard_mask > 0] = FACIAL_HAIR_CLASS
         
         return seg_map
+
+
+def get_face_parser() -> Any:
+    """
+    Initialize and return a face parsing model
+    
+    Returns:
+        The initialized face parser model
+    """
+    global FACE_PARSER
+    
+    with THREAD_LOCK:
+        if FACE_PARSER is None:
+            logger.info("Initializing face parsing model")
+            try:
+                # For this implementation, we'll use a simulated parser
+                # In a real implementation, you would load a proper segmentation model
+                # Such as BiSeNet, FaceParseNet, or similar
+                
+                FACE_PARSER = SimulatedFaceParser()
+                
+                logger.info("Face parsing model initialized successfully")
+            except Exception as e:
+                logger.error(f"Error initializing face parsing model: {str(e)}")
+                logger.debug("Error details:", exc_info=True)
+                raise
+                
+    return FACE_PARSER
 
 
 def extract_hair_mask(face_img: Frame) -> Tuple[np.ndarray, np.ndarray]:
@@ -289,7 +277,7 @@ def match_hair_color(source_img: Frame, target_img: Frame, mask: np.ndarray) -> 
     return target_img
 
 
-def transfer_hair(source_face_img: Frame, target_frame: Frame, target_face: Face) -> Frame: # type: ignore
+def transfer_hair(source_face_img: Frame, target_frame: Frame, target_face: Face) -> Frame:
     """
     Transfer hair from source face to target face
     
@@ -309,15 +297,23 @@ def transfer_hair(source_face_img: Frame, target_frame: Frame, target_face: Face
     
     # Extract target face crop
     target_face_crop = target_frame[y_min:y_max, x_min:x_max]
+    if target_face_crop.size == 0:
+        logger.warning("Empty target face crop, skipping hair transfer")
+        return target_frame
     
     # Resize source face to match target face size
-    resized_source = cv2.resize(source_face_img, (target_face_crop.shape[1], target_face_crop.shape[0]))
+    try:
+        resized_source = cv2.resize(source_face_img, (target_face_crop.shape[1], target_face_crop.shape[0]))
+    except Exception as e:
+        logger.error(f"Error resizing source face: {str(e)}")
+        return target_frame
     
     # Extract hair masks for both source and target
     source_hair_mask, source_beard_mask = extract_hair_mask(resized_source)
     target_hair_mask, target_beard_mask = extract_hair_mask(target_face_crop)
     
     # Apply color matching to hair and beard regions
+    logger.debug("Applying hair color transfer")
     target_face_with_hair = match_hair_color(resized_source, target_face_crop, source_hair_mask)
     target_face_with_hair_beard = match_hair_color(resized_source, target_face_with_hair, source_beard_mask)
     
@@ -330,7 +326,7 @@ def transfer_hair(source_face_img: Frame, target_frame: Frame, target_face: Face
     return result_frame
 
 
-def process_frame(source_face: Face, temp_frame: Frame) -> Frame: # type: ignore
+def process_frame(source_face: Face, temp_frame: Frame) -> Frame:
     """
     Process a single frame to transfer hair from source to target
     
@@ -348,8 +344,19 @@ def process_frame(source_face: Face, temp_frame: Frame) -> Frame: # type: ignore
     try:
         # Get source face image
         source_img = cv2.imread(modules.globals.source_path)
+        if source_img is None:
+            logger.error(f"Could not read source image: {modules.globals.source_path}")
+            return temp_frame
+            
         x_min, y_min, x_max, y_max = map(int, source_face.bbox)
+        if x_min < 0 or y_min < 0 or x_max > source_img.shape[1] or y_max > source_img.shape[0]:
+            logger.error("Invalid source face bounding box")
+            return temp_frame
+            
         source_face_img = source_img[y_min:y_max, x_min:x_max]
+        if source_face_img.size == 0:
+            logger.error("Empty source face crop")
+            return temp_frame
         
         # Get target face
         target_face = get_one_face(temp_frame)
@@ -405,7 +412,7 @@ def process_image(source_path: str, target_path: str, output_path: str) -> None:
         logger.debug("Error details:", exc_info=True)
 
 
-def process_frames(source_path: str, temp_frame_paths: list, progress: Any = None) -> None:
+def process_frames(source_path: str, temp_frame_paths: List[str], progress: Any = None) -> None:
     """
     Process multiple frames for hair transfer
     
@@ -419,6 +426,10 @@ def process_frames(source_path: str, temp_frame_paths: list, progress: Any = Non
     try:
         # Read source image and get source face
         source_img = cv2.imread(source_path)
+        if source_img is None:
+            logger.error(f"Failed to read source image: {source_path}")
+            return
+            
         source_face = get_one_face(source_img)
         
         if source_face is None:
@@ -453,7 +464,7 @@ def process_frames(source_path: str, temp_frame_paths: list, progress: Any = Non
         logger.debug("Error details:", exc_info=True)
 
 
-def process_video(source_path: str, temp_frame_paths: list) -> None:
+def process_video(source_path: str, temp_frame_paths: List[str]) -> None:
     """
     Process video frames for hair transfer
     

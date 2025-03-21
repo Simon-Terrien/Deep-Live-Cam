@@ -21,7 +21,7 @@ keep_audio = True
 keep_frames = False
 many_faces = False
 map_faces = False
-color_correction = False  # New global variable for color correction toggle
+color_correction = True  # New global variable for color correction toggle
 nsfw_filter = False
 video_encoder = None
 video_quality = None
@@ -32,7 +32,11 @@ execution_providers: List[str] = []
 execution_threads = None
 headless = None
 log_level = "error"
-fp_ui: Dict[str, bool] = {"face_enhancer": False}
+fp_ui: Dict[str, bool] = {
+    "face_enhancer": False,  # This is probably already there
+    "face_swapper": True,    # Add this - true by default
+    "hair_transfer": False   # Add this
+}
 camera_input_combobox = None
 webcam_preview_running = False
 show_fps = False
