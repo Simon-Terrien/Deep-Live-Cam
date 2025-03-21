@@ -27,10 +27,21 @@ def get_face_analyser() -> Any:
 def get_one_face(frame: Frame) -> Any:
     face = get_face_analyser().get(frame)
     try:
-        return min(face, key=lambda x: x.bbox[0])
+        face_obj = min(face, key=lambda x: x.bbox[0])
+        # Expand the bounding box to include more hair
+        x_min, y_min, x_max, y_max = face_obj.bbox
+        # Expand vertical dimension to capture more hair (increase by 30%)
+        height = y_max - y_min
+        y_min = max(0, y_min - int(height * 0.3))  # Expand upward for hair
+        # Expand horizontally for fuller face capture
+        width = x_max - x_min
+        x_min = max(0, x_min - int(width * 0.1))
+        x_max = min(frame.shape[1], x_max + int(width * 0.1))
+        
+        face_obj.bbox = np.array([x_min, y_min, x_max, y_max])
+        return face_obj
     except ValueError:
         return None
-
 
 def get_many_faces(frame: Frame) -> Any:
     try:
